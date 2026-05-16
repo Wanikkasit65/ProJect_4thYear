@@ -1,0 +1,242 @@
+import 'dart:convert';
+
+import 'package:http/http.dart' as http;
+
+import 'app_config.dart';
+import 'models.dart';
+
+class RunnaApi {
+  RunnaApi({http.Client? client}) : _client = client ?? http.Client();
+
+  final http.Client _client;
+
+  Uri _uri(String path) => Uri.parse('${AppConfig.apiBaseUrl}$path');
+
+  Future<HealthResponse> getHealth() async {
+    final response = await _client.get(_uri('/health'));
+    _ensureSuccess(response);
+    return HealthResponse.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<UserProfile> register({
+    required String firstName,
+    required String lastName,
+    required String username,
+    required String email,
+    required String password,
+  }) async {
+    final response = await _client.post(
+      _uri('/auth/register'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'first_name': firstName,
+        'last_name': lastName,
+        'username': username,
+        'email': email,
+        'password': password,
+      }),
+    );
+    _ensureSuccess(response);
+    return UserProfile.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<AuthToken> login({
+    required String usernameOrEmail,
+    required String password,
+  }) async {
+    final response = await _client.post(
+      _uri('/auth/login'),
+      headers: {'Content-Type': 'application/json'},
+      body: jsonEncode({
+        'username_or_email': usernameOrEmail,
+        'password': password,
+      }),
+    );
+    _ensureSuccess(response);
+    return AuthToken.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<UserProfile> getMe(String accessToken) async {
+    final response = await _client.get(
+      _uri('/me'),
+      headers: {'Authorization': 'Bearer $accessToken'},
+    );
+    _ensureSuccess(response);
+    return UserProfile.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<BaseMapData> getBaseMap() async {
+    final response = await _client.get(_uri('/map/base'));
+    _ensureSuccess(response);
+    return BaseMapData.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<List<HazardMarkerItem>> getMarkers() async {
+    final response = await _client.get(_uri('/map/markers'));
+    _ensureSuccess(response);
+    final body = jsonDecode(response.body) as List<dynamic>;
+    return body.map((item) => HazardMarkerItem.fromJson(item as Map<String, dynamic>)).toList();
+  }
+
+  Future<HazardMarkerItem> createMarker({
+    required String accessToken,
+    required String markerType,
+    required int severity,
+    required double lat,
+    required double lng,
+    String? note,
+  }) async {
+    final response = await _client.post(
+      _uri('/map/markers'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $accessToken',
+      },
+      body: jsonEncode({
+        'marker_type': markerType,
+        'severity': severity,
+        'lat': lat,
+        'lng': lng,
+        'note': note,
+      }),
+    );
+    _ensureSuccess(response);
+    return HazardMarkerItem.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<List<ManualRouteItem>> getManualRoutes(String accessToken) async {
+    final response = await _client.get(
+      _uri('/map/manual-routes'),
+      headers: {'Authorization': 'Bearer $accessToken'},
+    );
+    _ensureSuccess(response);
+    final body = jsonDecode(response.body) as List<dynamic>;
+    return body.map((item) => ManualRouteItem.fromJson(item as Map<String, dynamic>)).toList();
+  }
+
+  Future<ManualRouteItem> createManualRoute({
+    required String accessToken,
+    required String name,
+    required List<RoutePoint> points,
+  }) async {
+    final response = await _client.post(
+      _uri('/map/manual-routes'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $accessToken',
+      },
+      body: jsonEncode({
+        'name': name,
+        'points': points.map((point) => point.toJson()).toList(),
+      }),
+    );
+    _ensureSuccess(response);
+    return ManualRouteItem.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<List<RunItem>> getRuns(String accessToken) async {
+    final response = await _client.get(
+      _uri('/runs'),
+      headers: {'Authorization': 'Bearer $accessToken'},
+    );
+    _ensureSuccess(response);
+    final body = jsonDecode(response.body) as List<dynamic>;
+    return body.map((item) => RunItem.fromJson(item as Map<String, dynamic>)).toList();
+  }
+
+  Future<RunItem> startRun({
+    required String accessToken,
+    String? notes,
+  }) async {
+    final response = await _client.post(
+      _uri('/runs/start'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $accessToken',
+      },
+      body: jsonEncode({'notes': notes}),
+    );
+    _ensureSuccess(response);
+    return RunItem.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<RunItem> finishRun({
+    required String accessToken,
+    required int runId,
+    required double distanceKm,
+    required int durationSeconds,
+  }) async {
+    final response = await _client.post(
+      _uri('/runs/$runId/finish'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $accessToken',
+      },
+      body: jsonEncode({
+        'distance_km': distanceKm,
+        'duration_seconds': durationSeconds,
+      }),
+    );
+    _ensureSuccess(response);
+    return RunItem.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  Future<List<RoutePlanItem>> getRoutes(String accessToken) async {
+    final response = await _client.get(
+      _uri('/routes'),
+      headers: {'Authorization': 'Bearer $accessToken'},
+    );
+    _ensureSuccess(response);
+    final body = jsonDecode(response.body) as List<dynamic>;
+    return body.map((item) => RoutePlanItem.fromJson(item as Map<String, dynamic>)).toList();
+  }
+
+  Future<RoutePlanItem> generateRoute({
+    required String accessToken,
+    required String startLabel,
+    required double targetDistanceKm,
+    required String routeType,
+    required String environment,
+  }) async {
+    final response = await _client.post(
+      _uri('/routes/generate'),
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer $accessToken',
+      },
+      body: jsonEncode({
+        'start_label': startLabel,
+        'target_distance_km': targetDistanceKm,
+        'route_type': routeType,
+        'environment': environment,
+      }),
+    );
+    _ensureSuccess(response);
+    return RoutePlanItem.fromJson(jsonDecode(response.body) as Map<String, dynamic>);
+  }
+
+  void _ensureSuccess(http.Response response) {
+    if (response.statusCode >= 200 && response.statusCode < 300) {
+      return;
+    }
+    String detail = 'Request failed with status ${response.statusCode}';
+    try {
+      final body = jsonDecode(response.body) as Map<String, dynamic>;
+      if (body['detail'] is String) {
+        detail = body['detail'] as String;
+      }
+    } catch (_) {
+      // Keep fallback detail if the response is not JSON.
+    }
+    throw RunnaApiException(detail);
+  }
+}
+
+class RunnaApiException implements Exception {
+  const RunnaApiException(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
