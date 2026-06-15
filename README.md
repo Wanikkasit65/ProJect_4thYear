@@ -23,8 +23,9 @@ Frontend:
 - Build output: `/build/app/outputs/flutter-apk/app-release.apk`
 
 Backend:
-- Deployed API server: https://your-backend-deploy-link
-
+- Deployed API server:
+  https://runna-backend.onrender.com/docs
+  https://runna-backend.onrender.com
 Database:
 - Hosted PostgreSQL instance
 
