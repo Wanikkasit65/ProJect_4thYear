@@ -20,7 +20,7 @@ Runna is a mobile application designed to improve running experience by combinin
 
 Frontend:
 - Android APK available for installation
-- Build output: `/build/app/outputs/flutter-apk/app-release.apk`
+- Website https://runna-sand.vercel.app/
 
 Backend:
 - Deployed API server:
