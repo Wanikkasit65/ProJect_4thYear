@@ -24,26 +24,55 @@ class _RunsScreenState extends State<RunsScreen> {
   final _distance = const Distance();
 
   StreamSubscription<Position>? _positionSubscription;
+  Timer? _runningTimer;
+
   List<RunItem> _runs = const [];
   List<ManualRouteItem> _manualRoutes = const [];
   List<RoutePoint> _trackedPoints = const [];
+  List<HazardMarkerItem> _hazardMarkers = const [];
   ManualRouteItem? _selectedRoute;
   RunItem? _activeRun;
+  RunItem? _justFinishedRun;
   Position? _currentPosition;
   String? _message;
   bool _isLoading = false;
   bool _isTracking = false;
 
+  int _secondsElapsed = 0;
+
+  int _estimateSteps(double distanceKm) => (distanceKm * 1000 / 0.75).round();
+
+  String _formatDuration(int totalSeconds) {
+    final hours = totalSeconds ~/ 3600;
+    final minutes = (totalSeconds % 3600) ~/ 60;
+    final seconds = totalSeconds % 60;
+    return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  }
+
   @override
   void initState() {
     super.initState();
     _loadRuns();
+    _loadHazardMarkers();
   }
 
   @override
   void dispose() {
     _positionSubscription?.cancel();
+    _runningTimer?.cancel();
     super.dispose();
+  }
+
+  Future<void> _loadHazardMarkers() async {
+    try {
+      final markers = await widget.controller.getMarkers();
+      if (!mounted) return;
+      setState(() {
+        _hazardMarkers = markers;
+      });
+    } catch (_) {
+      // Non-fatal: hazard pins are supplementary, don't block run tracking on failure.
+    }
   }
 
   Future<void> _loadRuns() async {
@@ -137,11 +166,24 @@ class _RunsScreenState extends State<RunsScreen> {
       return;
     }
 
+    if (_positionSubscription != null) {
+      await _positionSubscription?.cancel();
+      _positionSubscription = null;
+    }
+    if (_runningTimer != null) {
+      _runningTimer?.cancel();
+      _runningTimer = null;
+    }
+
     setState(() {
       _isLoading = true;
       _message = null;
       _trackedPoints = const [];
+      _justFinishedRun = null;
+      _secondsElapsed = 0;
+      _isTracking = false;
     });
+
     try {
       final run = await widget.controller.startRun(
         manualRouteId: route.id,
@@ -151,8 +193,10 @@ class _RunsScreenState extends State<RunsScreen> {
       setState(() {
         _activeRun = run;
       });
+      _startTimer();
       await _startLocationStream();
       await _loadRuns();
+      await _loadHazardMarkers();
     } catch (error) {
       if (!mounted) return;
       setState(() {
@@ -165,6 +209,17 @@ class _RunsScreenState extends State<RunsScreen> {
         });
       }
     }
+  }
+
+  void _startTimer() {
+    _runningTimer?.cancel();
+    _runningTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (mounted && _isTracking) {
+        setState(() {
+          _secondsElapsed++;
+        });
+      }
+    });
   }
 
   Future<void> _startLocationStream() async {
@@ -182,6 +237,7 @@ class _RunsScreenState extends State<RunsScreen> {
     setState(() {
       _isTracking = true;
     });
+    _startTimer();
   }
 
   Future<void> _handlePosition(Position position) async {
@@ -227,11 +283,25 @@ class _RunsScreenState extends State<RunsScreen> {
     try {
       await _positionSubscription?.cancel();
       _positionSubscription = null;
-      await widget.controller.finishRun(runId: activeRun.id);
+      _runningTimer?.cancel();
+      _runningTimer = null;
+
+      final estimatedSteps = _estimateSteps(_trackedDistanceKm);
+      final finalDuration = _secondsElapsed > 0 ? _secondsElapsed : 1;
+
+      final finished = await widget.controller.finishRun(
+        runId: activeRun.id,
+        distanceKm: _trackedDistanceKm,
+        durationSeconds: finalDuration,
+        stepCount: estimatedSteps,
+      );
+
       if (!mounted) return;
+
       setState(() {
         _activeRun = null;
         _isTracking = false;
+        _justFinishedRun = finished;
       });
       await _loadRuns();
     } catch (error) {
@@ -284,6 +354,68 @@ class _RunsScreenState extends State<RunsScreen> {
         .reduce((value, element) => value < element ? value : element);
   }
 
+  void _openHistorySheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (sheetContext) {
+        return DraggableScrollableSheet(
+          initialChildSize: 0.75,
+          minChildSize: 0.4,
+          maxChildSize: 0.95,
+          expand: false,
+          builder: (context, scrollController) {
+            return _RunHistorySheet(
+              runs: _runs,
+              scrollController: scrollController,
+              onRefresh: _loadRuns,
+              isLoading: _isLoading,
+            );
+          },
+        );
+      },
+    );
+  }
+
+  void _showHazardDetails(HazardMarkerItem marker) {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      builder: (context) {
+        return Padding(
+          padding: const EdgeInsets.all(20),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  const Icon(Icons.warning_amber_rounded, color: Color(0xFFC45C4A)),
+                  const SizedBox(width: 8),
+                  Text(
+                    marker.categoryLabel,
+                    style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text('Severity: ${marker.severity} • Confirms: ${marker.confirmCount}'),
+              if (marker.note != null && marker.note!.isNotEmpty) ...[
+                const SizedBox(height: 8),
+                Text(marker.note!),
+              ],
+            ],
+          ),
+        );
+      },
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     final route = _selectedRoute;
@@ -291,11 +423,159 @@ class _RunsScreenState extends State<RunsScreen> {
     final trackedPolyline = _trackedPoints.map((point) => LatLng(point.lat, point.lng)).toList();
     final currentPosition = _currentPosition;
     final offRouteMeters = _offRouteMeters;
+    final justFinished = _justFinishedRun;
+
+    final hazardMapMarkers = _hazardMarkers
+        .map(
+          (marker) => Marker(
+            point: LatLng(marker.lat, marker.lng),
+            width: 36,
+            height: 36,
+            child: GestureDetector(
+              onTap: () => _showHazardDetails(marker),
+              child: const _HazardPin(),
+            ),
+          ),
+        )
+        .toList();
+
+    if (justFinished != null) {
+      final String? aiInsight = justFinished.aiInsight;
+      final String? aiReasoning = justFinished.aiReasoning;
+      final String? aiRecommendations = justFinished.aiRecommendations;
+
+      final hasAi = aiInsight != null && aiInsight.isNotEmpty;
+
+      return Scaffold(
+        backgroundColor: Colors.white,
+        body: SafeArea(
+          child: ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              Row(
+                children: [
+                  IconButton(
+                    icon: const Icon(Icons.arrow_back, color: Colors.black87),
+                    onPressed: () {
+                      setState(() {
+                        _justFinishedRun = null;
+                        _trackedPoints = const [];
+                      });
+                    },
+                  ),
+                  const SizedBox(width: 4),
+                  Expanded(
+                    child: Text(
+                      'Summary Result',
+                      style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
+                    ),
+                  ),
+                  IconButton.filledTonal(
+                    tooltip: 'Run history',
+                    onPressed: _openHistorySheet,
+                    icon: const Icon(Icons.history),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 20),
+              Container(
+                padding: const EdgeInsets.all(16),
+                decoration: BoxDecoration(
+                  color: Colors.grey.shade100,
+                  borderRadius: BorderRadius.circular(16),
+                ),
+                child: Column(
+                  children: [
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        Expanded(child: _MetricTile(label: 'Distance', value: '${justFinished.distanceKm.toStringAsFixed(2)} km')),
+                        Expanded(child: _MetricTile(label: 'Steps', value: '${justFinished.stepCount} steps')),
+                      ],
+                    ),
+                    const SizedBox(height: 16),
+                    Row(
+                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                      children: [
+                        Expanded(child: _MetricTile(label: 'Duration', value: '${justFinished.durationSeconds}s')),
+                        Expanded(
+                          child: _MetricTile(
+                            label: 'Pace',
+                            value: justFinished.avgPaceMinPerKm != null
+                                ? '${justFinished.avgPaceMinPerKm!.toStringAsFixed(2)} m/k'
+                                : '--',
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+              const SizedBox(height: 16),
+              Container(
+                padding: const EdgeInsets.all(18),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFE8F5E9),
+                  borderRadius: BorderRadius.circular(16),
+                  border: Border.all(color: const Color(0xFFA5D6A7), width: 1),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Row(
+                      children: [
+                        Icon(Icons.auto_awesome, color: Color(0xFF2E7D32)),
+                        SizedBox(width: 8),
+                        Text(
+                          'AI Insight Summary',
+                          style: TextStyle(color: Color(0xFF2E7D32), fontWeight: FontWeight.bold, fontSize: 16),
+                        ),
+                      ],
+                    ),
+                    const Divider(color: Color(0xFFA5D6A7), height: 24),
+                    if (hasAi) ...[
+                      _ReadableAiSection(title: 'Insight', body: aiInsight),
+                      if (aiReasoning != null && aiReasoning.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        _ReadableAiSection(title: 'Reasoning', body: aiReasoning),
+                      ],
+                      if (aiRecommendations != null && aiRecommendations.isNotEmpty) ...[
+                        const SizedBox(height: 14),
+                        _ReadableAiSection(title: 'Recommendations', body: aiRecommendations),
+                      ],
+                    ] else
+                      const Padding(
+                        padding: EdgeInsets.symmetric(vertical: 12.0),
+                        child: Text(
+                          'AI Summary is processing. Please check back shortly in Run History.',
+                          style: TextStyle(color: Color(0xFF2E7D32), fontWeight: FontWeight.w500, fontStyle: FontStyle.italic),
+                        ),
+                      ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+    }
+
+    final bool isFinishEnabled = !_isLoading && _activeRun != null && _isTracking;
 
     return ListView(
       padding: const EdgeInsets.all(20),
       children: [
-        Text('Runs', style: Theme.of(context).textTheme.headlineSmall),
+        Row(
+          mainAxisAlignment: MainAxisAlignment.spaceBetween,
+          children: [
+            Text('Runs', style: Theme.of(context).textTheme.headlineSmall),
+            IconButton.filledTonal(
+              tooltip: 'Run history',
+              onPressed: _openHistorySheet,
+              icon: const Icon(Icons.history),
+            ),
+          ],
+        ),
         const SizedBox(height: 12),
         Container(
           height: 380,
@@ -337,6 +617,7 @@ class _RunsScreenState extends State<RunsScreen> {
                 ),
               MarkerLayer(
                 markers: [
+                  ...hazardMapMarkers,
                   if (currentPosition != null)
                     Marker(
                       point: LatLng(currentPosition.latitude, currentPosition.longitude),
@@ -390,7 +671,9 @@ class _RunsScreenState extends State<RunsScreen> {
               LinearProgressIndicator(value: _progress),
               const SizedBox(height: 8),
               Text(
-                'Progress: ${(_progress * 100).toStringAsFixed(0)}% • Tracked: ${_trackedDistanceKm.toStringAsFixed(2)} km',
+                'Progress: ${(_progress * 100).toStringAsFixed(0)}% • Tracked: ${_trackedDistanceKm.toStringAsFixed(2)} km'
+                ' • ~${_estimateSteps(_trackedDistanceKm)} steps'
+                '${_activeRun != null ? ' • Time: ${_formatDuration(_secondsElapsed)}' : ''}',
               ),
               if (offRouteMeters != null) ...[
                 const SizedBox(height: 6),
@@ -410,11 +693,11 @@ class _RunsScreenState extends State<RunsScreen> {
                     child: const Text('Locate me'),
                   ),
                   FilledButton(
-                    onPressed: _isLoading || _activeRun != null ? null : _startRun,
+                    onPressed: (_isLoading || isFinishEnabled) ? null : _startRun,
                     child: const Text('Start route run'),
                   ),
                   FilledButton.tonal(
-                    onPressed: _isLoading || _activeRun == null ? null : _finishRun,
+                    onPressed: isFinishEnabled ? _finishRun : null,
                     child: const Text('Finish run'),
                   ),
                   OutlinedButton(
@@ -426,26 +709,67 @@ class _RunsScreenState extends State<RunsScreen> {
             ],
           ),
         ),
-        const SizedBox(height: 20),
-        FilledButton.tonal(
-          onPressed: _isLoading ? null : _loadRuns,
-          child: const Text('Refresh runs'),
-        ),
         const SizedBox(height: 16),
-        if (_runs.isEmpty)
-          const Text('No runs yet.')
-        else
-          ..._runs.map(
-            (run) => Card(
-              child: ListTile(
-                title: Text('Run #${run.id}'),
-                subtitle: Text(
-                  'Status: ${run.status}\nDistance: ${run.distanceKm.toStringAsFixed(2)} km\nDuration: ${run.durationSeconds}s',
-                ),
-                isThreeLine: true,
-              ),
-            ),
-          ),
+        TextButton.icon(
+          onPressed: _openHistorySheet,
+          icon: const Icon(Icons.history),
+          label: Text('View all runs (${_runs.length})'),
+        ),
+      ],
+    );
+  }
+}
+
+class _HazardPin extends StatelessWidget {
+  const _HazardPin();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      decoration: const BoxDecoration(
+        color: Color(0xFFC45C4A),
+        shape: BoxShape.circle,
+        boxShadow: [
+          BoxShadow(color: Color(0x33000000), blurRadius: 6, offset: Offset(0, 2)),
+        ],
+      ),
+      child: const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 18),
+    );
+  }
+}
+
+class _MetricTile extends StatelessWidget {
+  const _MetricTile({required this.label, required this.value});
+  final String label;
+  final String value;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        Text(label, style: TextStyle(color: Colors.grey.shade600, fontSize: 12, fontWeight: FontWeight.w500)),
+        const SizedBox(height: 2),
+        Text(value, style: const TextStyle(color: Colors.black87, fontSize: 15, fontWeight: FontWeight.bold)),
+      ],
+    );
+  }
+}
+
+class _ReadableAiSection extends StatelessWidget {
+  const _ReadableAiSection({required this.title, required this.body});
+  final String title;
+  final String body;
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: const TextStyle(color: Color(0xFF1B5E20), fontWeight: FontWeight.bold, fontSize: 14)),
+        const SizedBox(height: 4),
+        Text(body, style: const TextStyle(color: Colors.black87, height: 1.4, fontSize: 13)),
       ],
     );
   }
@@ -470,6 +794,157 @@ class _CurrentLocationPin extends StatelessWidget {
         ],
       ),
       child: const Icon(Icons.my_location, color: Colors.white, size: 18),
+    );
+  }
+}
+
+class _RunHistorySheet extends StatefulWidget {
+  const _RunHistorySheet({
+    required this.runs,
+    required this.scrollController,
+    required this.onRefresh,
+    required this.isLoading,
+  });
+
+  final List<RunItem> runs;
+  final ScrollController scrollController;
+  final Future<void> Function() onRefresh;
+  final bool isLoading;
+
+  @override
+  State<_RunHistorySheet> createState() => _RunHistorySheetState();
+}
+
+class _RunHistorySheetState extends State<_RunHistorySheet> {
+  int? _expandedRunId;
+
+  @override
+  Widget build(BuildContext context) {
+    final List<RunItem> finishedRuns = widget.runs.where((run) => run.status == 'finished').toList();
+
+    return Column(
+      children: [
+        const SizedBox(height: 12),
+        Container(
+          width: 40,
+          height: 4,
+          decoration: BoxDecoration(
+            color: Colors.grey.shade300,
+            borderRadius: BorderRadius.circular(4),
+          ),
+        ),
+        const SizedBox(height: 16),
+        Padding(
+          padding: const EdgeInsets.symmetric(horizontal: 20),
+          child: Row(
+            mainAxisAlignment: MainAxisAlignment.spaceBetween,
+            children: [
+              Text('Run history', style: Theme.of(context).textTheme.titleLarge),
+              IconButton(
+                onPressed: widget.isLoading ? null : widget.onRefresh,
+                icon: const Icon(Icons.refresh),
+              ),
+            ],
+          ),
+        ),
+        const SizedBox(height: 8),
+        Expanded(
+          child: finishedRuns.isEmpty
+              ? const Center(child: Text('No finished runs yet.'))
+              : ListView.builder(
+                  controller: widget.scrollController,
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  itemCount: finishedRuns.length,
+                  itemBuilder: (context, index) {
+                    final run = finishedRuns[index];
+                    final isExpanded = _expandedRunId == run.id;
+
+                    final String? aiInsight = run.aiInsight;
+                    final String? aiReasoning = run.aiReasoning;
+                    final String? aiRecommendations = run.aiRecommendations;
+
+                    final hasAi = aiInsight != null && aiInsight.isNotEmpty;
+
+                    return Card(
+                      margin: const EdgeInsets.only(bottom: 10),
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          ListTile(
+                            title: Text('Run #${run.id}'),
+                            subtitle: Text(
+                              '${run.distanceKm.toStringAsFixed(2)} km • ${run.durationSeconds}s • ${run.stepCount} steps'
+                              '${run.avgPaceMinPerKm != null ? ' • ${run.avgPaceMinPerKm!.toStringAsFixed(2)} m/k' : ''}',
+                            ),
+                            trailing: Icon(
+                              isExpanded ? Icons.expand_less : Icons.expand_more,
+                              color: const Color(0xFF2A9D8F),
+                            ),
+                            onTap: () => setState(() {
+                              _expandedRunId = isExpanded ? null : run.id;
+                            }),
+                          ),
+                          if (isExpanded)
+                            Padding(
+                              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                              child: Column(
+                                crossAxisAlignment: CrossAxisAlignment.start,
+                                children: [
+                                  Container(
+                                    padding: const EdgeInsets.all(12),
+                                    decoration: BoxDecoration(
+                                      color: Colors.grey.shade50,
+                                      borderRadius: BorderRadius.circular(12),
+                                    ),
+                                    child: Row(
+                                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                                      children: [
+                                        Expanded(child: _MetricTile(label: 'Distance', value: '${run.distanceKm.toStringAsFixed(2)} km')),
+                                        Expanded(child: _MetricTile(label: 'Steps', value: '${run.stepCount}')),
+                                        Expanded(child: _MetricTile(label: 'Duration', value: '${run.durationSeconds}s')),
+                                      ],
+                                    ),
+                                  ),
+                                  const SizedBox(height: 12),
+                                  Container(
+                                    width: double.infinity,
+                                    padding: const EdgeInsets.all(14),
+                                    decoration: BoxDecoration(
+                                      color: const Color(0xFFE8F5E9),
+                                      borderRadius: BorderRadius.circular(12),
+                                      border: Border.all(color: const Color(0xFFA5D6A7)),
+                                    ),
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        if (hasAi) ...[
+                                          _ReadableAiSection(title: 'Insight', body: aiInsight),
+                                          if (aiReasoning != null && aiReasoning.isNotEmpty) ...[
+                                            const SizedBox(height: 8),
+                                            _ReadableAiSection(title: 'Reasoning', body: aiReasoning),
+                                          ],
+                                          if (aiRecommendations != null && aiRecommendations.isNotEmpty) ...[
+                                            const SizedBox(height: 8),
+                                            _ReadableAiSection(title: 'Recommendations', body: aiRecommendations),
+                                          ],
+                                        ] else
+                                          const Text(
+                                            'No AI data available for this run.',
+                                            style: TextStyle(color: Color(0xFF1B5E20), fontStyle: FontStyle.italic),
+                                          ),
+                                      ],
+                                    ),
+                                  ),
+                                ],
+                              ),
+                            ),
+                        ],
+                      ),
+                    );
+                  },
+                ),
+        ),
+      ],
     );
   }
 }
