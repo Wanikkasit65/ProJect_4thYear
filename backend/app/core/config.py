@@ -17,7 +17,7 @@ class Settings(BaseSettings):
     gemini_api_key: str = Field(default="", alias="GEMINI_API_KEY")
 
     # 📝 2 บรรทัดที่พวกเราเพิ่มเข้าไปเพื่อรองรับการล็อกอินแอดมิน
-    admin_email: str = Field(default="admin@runna.local", alias="ADMIN_EMAIL")
+    admin_email: str = Field(default="admin@runna.com", alias="ADMIN_EMAIL")
     admin_password: str = Field(default="admin1234", alias="ADMIN_PASSWORD")
 
     model_config = SettingsConfigDict(
