@@ -40,14 +40,17 @@ class AuthService:
         self.db.refresh(user)
         return user
 
-    def login(self, payload: LoginRequest) -> TokenResponse | None:
+def login(self, payload: LoginRequest) -> TokenResponse: # ปรับ Type hint เอา | None ออก
         user = self.db.scalar(
             select(User).where(or_(User.username == payload.username_or_email, User.email == payload.username_or_email))
         )
         if user is None or not verify_password(payload.password, user.password_hash):
-            return None
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, 
+                detail="Incorrect username or password"
+            )
+            
         return TokenResponse(access_token=create_access_token(str(user.id)))
-
 
 def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
