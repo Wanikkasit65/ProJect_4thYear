@@ -28,6 +28,7 @@ class _RunnaAppState extends State<RunnaApp> {
   void initState() {
     super.initState();
     _controller = AuthController()..addListener(_onControllerChanged);
+    _controller.restoreSession();
   }
 
   @override
@@ -47,6 +48,17 @@ class _RunnaAppState extends State<RunnaApp> {
 
   @override
   Widget build(BuildContext context) {
+      if (_controller.isRestoring) {
+    return MaterialApp(
+      title: 'Runna',
+      debugShowCheckedModeBanner: false,
+      theme: RunnaTheme.light(),
+      home: const Scaffold(
+        body: Center(child: CircularProgressIndicator()),
+      ),
+    );
+  }
+  
     final destinations = <NavigationDestination>[
       const NavigationDestination(icon: Icon(Icons.home_outlined), selectedIcon: Icon(Icons.home), label: 'Home'),
       const NavigationDestination(icon: Icon(Icons.map_outlined), selectedIcon: Icon(Icons.map), label: 'Routes'),

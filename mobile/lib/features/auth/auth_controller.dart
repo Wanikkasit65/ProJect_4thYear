@@ -1,4 +1,6 @@
+import 'dart:convert';
 import 'package:flutter/foundation.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../../core/models.dart';
 import '../../core/runna_api.dart';
@@ -6,14 +8,50 @@ import '../../core/runna_api.dart';
 class AuthController extends ChangeNotifier {
   AuthController({RunnaApi? api}) : _api = api ?? RunnaApi();
 
+  static const _tokenStorageKey = 'runna_access_token';
   final RunnaApi _api;
   String? _accessToken;
   UserProfile? _currentUser;
+  bool _isRestoring = true;
 
   String? get accessToken => _accessToken;
   UserProfile? get currentUser => _currentUser;
   bool get isAuthenticated => _accessToken != null && _currentUser != null;
   bool get isAdmin => _currentUser?.isAdmin ?? false;
+  bool get isRestoring => _isRestoring;
+
+  /// Attempts to restore a previous session from the persistent storage pool.
+  Future<void> restoreSession() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final savedToken = prefs.getString(_tokenStorageKey);
+      
+      if (savedToken != null && savedToken.isNotEmpty) {
+        // Validate token vitality by calling the profile endpoint
+        final user = await _api.getMe(savedToken);
+        _accessToken = savedToken;
+        _currentUser = user;
+      }
+    } catch (_) {
+      // Invalidate on expiration or connection failure to prevent corruption
+      await _clearStoredToken();
+      _accessToken = null;
+      _currentUser = null;
+    } finally {
+      _isRestoring = false;
+      notifyListeners();
+    }
+  }
+
+  Future<void> _persistToken(String token) async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setString(_tokenStorageKey, token);
+  }
+
+  Future<void> _clearStoredToken() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.remove(_tokenStorageKey);
+  }
 
   Future<HealthResponse> getHealth() => _api.getHealth();
 
@@ -43,13 +81,15 @@ class AuthController extends ChangeNotifier {
     );
     _accessToken = token.accessToken;
     _currentUser = await _api.getMe(token.accessToken);
+    await _persistToken(token.accessToken);
     notifyListeners();
     return _currentUser!;
   }
 
-  void logout() {
+  Future<void> logout() async {
     _accessToken = null;
     _currentUser = null;
+    await _clearStoredToken();
     notifyListeners();
   }
 
@@ -210,7 +250,7 @@ class AuthController extends ChangeNotifier {
     final token = _requireToken();
     return _api.deleteAdminMarker(accessToken: token, markerId: markerId);
   }
-  
+
   String _requireToken() {
     final token = _accessToken;
     if (token == null) {
