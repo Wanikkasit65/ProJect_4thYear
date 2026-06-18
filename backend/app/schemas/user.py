@@ -26,7 +26,7 @@ class AdminUserResponse(BaseModel):
     first_name: str
     last_name: str
     username: str
-    email: EmailStr
+    email: str
     is_active: bool
     role_name: str
     run_count: int = 0
