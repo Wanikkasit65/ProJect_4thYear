@@ -25,11 +25,15 @@ app = FastAPI(
     lifespan=lifespan,
 )
 
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=[
+        "https://runna-sand.vercel.app",
+        "http://localhost:3000",         
+        "http://localhost:8080",
+    ],
+    allow_credentials=True,  
     allow_headers=["*"],
 )
 
