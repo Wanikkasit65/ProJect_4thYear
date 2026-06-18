@@ -38,6 +38,7 @@ dependencies:
   http: ^1.4.0
   latlong2: ^0.9.1
   geolocator: ^13.0.1
+  shared_preferences: ^2.3.3
 
 dev_dependencies:
   flutter_test:
@@ -49,6 +50,15 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  
+  # 🎯 จุดที่ 1: จัดกลุ่ม flutter_launcher_icons เข้ามาอยู่ใต้ dev_dependencies อย่างถูกต้อง
+  flutter_launcher_icons: "^0.13.1"
+
+# 🎯 จุดที่ 2: บล็อกตั้งค่าการเจนไอคอนระบบดึงจากพิกัดโฟลเดอร์ web/icons/
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: false
+  image_path: "web/icons/Runnaapp_LogoApp.png"
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -60,6 +70,10 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # 🎯 จุดที่ 3: เปิดพาธในระบบ Assets ให้ Flutter รู้จักรูปภาพไอคอน
+  assets:
+    - web/icons/Runnaapp_LogoApp.png
 
   # To add assets to your application, add an assets section, like this:
   # assets:
