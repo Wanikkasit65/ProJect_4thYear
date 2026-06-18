@@ -1,14 +1,13 @@
 """add run track and analysis
 
 Revision ID: 20260615_0005
-Revises: 20260417_0004
+Revises: 20260417_0005
 Create Date: 2026-06-15 17:00:00
 """
 
 from alembic import op
 import sqlalchemy as sa
-from sqlalchemy.exc import ProgrammingError # 🎯 นำเข้าตัวตรวจจับ Error ของ DB
-
+from sqlalchemy.exc import ProgrammingError
 
 revision = "20260615_0005"
 down_revision = "20260417_0005"
@@ -29,7 +28,6 @@ def upgrade() -> None:
                 op.get_bind().rollback()
                 raise e
 
-    # ค่อย ๆ ทยอยรันทีละตัว ถ้าตัวไหนซ้ำ ระบบจะล้างสถานะงอน แล้วไปทำตัวถัดไปได้ฉลุยครับ
     safe_add_column("map_nodes", sa.Column("osm_id", sa.Integer(), nullable=True))
     safe_add_column("manual_routes", sa.Column("snapped_path_json", sa.String(length=16000), nullable=True))
     safe_add_column("manual_routes", sa.Column("validation_json", sa.String(length=1000), nullable=True))
@@ -42,7 +40,6 @@ def upgrade() -> None:
     safe_add_column("runs", sa.Column("ai_reasoning", sa.Text(), nullable=True))
     safe_add_column("runs", sa.Column("ai_recommendations", sa.Text(), nullable=True))
 
-    # สำหรับพวก Index และ Table ให้ครอบด้วย try-except แยกเดี่ยว ๆ
     try:
         op.create_index(op.f("ix_runs_manual_route_id"), "runs", ["manual_route_id"], unique=False)
         op.get_bind().commit()
@@ -89,3 +86,13 @@ def upgrade() -> None:
     except Exception:
         op.get_bind().rollback()
         print("Table run_points or its indices might already exist, skipping.")
+
+
+def downgrade() -> None:
+    op.drop_index(op.f("ix_run_points_run_id"), table_name="run_points")
+    op.drop_index(op.f("ix_run_points_id"), table_name="run_points")
+    op.drop_table("run_points")
+    op.drop_constraint("fk_runs_route_plan_id_route_plans", "runs", type_="foreignkey")
+    op.drop_index(op.f("ix_runs_route_plan_id"), table_name="runs")
+    op.drop_column("runs", "route_plan_id")
+    op.drop_column("map_nodes", "osm_id")
