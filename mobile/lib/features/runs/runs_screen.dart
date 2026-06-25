@@ -10,6 +10,10 @@ import '../../core/location_service.dart';
 import '../../core/models.dart';
 import '../auth/auth_controller.dart';
 
+// ─────────────────────────────────────────────────────────
+// Helpers (top-level so _RunHistorySheet can use them too)
+// ─────────────────────────────────────────────────────────
+
 String _formatAiStatusMessage(String? aiInsight) {
   if (aiInsight == null || aiInsight.isEmpty) {
     return 'No AI data available for this run.';
@@ -34,13 +38,19 @@ String _formatRunDuration(int totalSeconds) {
   final hours = totalSeconds ~/ 3600;
   final minutes = (totalSeconds % 3600) ~/ 60;
   final seconds = totalSeconds % 60;
-  return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}:${seconds.toString().padLeft(2, '0')}';
+  return '${hours.toString().padLeft(2, '0')}:'
+      '${minutes.toString().padLeft(2, '0')}:'
+      '${seconds.toString().padLeft(2, '0')}';
 }
 
 String _formatRunPace(double? paceMinPerKm) {
   if (paceMinPerKm == null) return '--';
   return '${paceMinPerKm.toStringAsFixed(2)} min/km';
 }
+
+// ─────────────────────────────────────────────────────────
+// RunsScreen
+// ─────────────────────────────────────────────────────────
 
 class RunsScreen extends StatefulWidget {
   const RunsScreen({super.key, required this.controller});
@@ -74,6 +84,12 @@ class _RunsScreenState extends State<RunsScreen> {
 
   int _secondsElapsed = 0;
 
+  // FIX #3 — store computed distance as a real field instead of a getter
+  // so setState() in _handlePosition triggers a UI rebuild with the new value.
+  double _trackedDistanceKm = 0.0;
+
+  // ── helpers ──────────────────────────────
+
   int _estimateSteps(double distanceKm) => (distanceKm * 1000 / 0.75).round();
 
   String _headingLabel(double? degrees) {
@@ -84,9 +100,7 @@ class _RunsScreenState extends State<RunsScreen> {
   }
 
   double? _resolveHeading(Position position) {
-    if (position.heading >= 0) {
-      return position.heading;
-    }
+    if (position.heading >= 0) return position.heading;
     if (_trackedPoints.isEmpty) return null;
     final previous = _trackedPoints.last;
     return Geolocator.bearingBetween(
@@ -98,17 +112,18 @@ class _RunsScreenState extends State<RunsScreen> {
   }
 
   String _formatDuration(int totalSeconds) => _formatRunDuration(totalSeconds);
-
   String _formatPace(double? paceMinPerKm) => _formatRunPace(paceMinPerKm);
 
   void _syncElapsedFromStart(DateTime? startedAt) {
     if (startedAt == null) return;
-    final elapsed = DateTime.now().toUtc().difference(startedAt.toUtc()).inSeconds;
-    if (elapsed > _secondsElapsed) {
-      _secondsElapsed = elapsed;
-    }
+    final elapsed =
+        DateTime.now().toUtc().difference(startedAt.toUtc()).inSeconds;
+    if (elapsed > _secondsElapsed) _secondsElapsed = elapsed;
   }
 
+  // FIX #1 — lower threshold to 2 m (was 3 m).
+  // GPS drift indoors / under tree cover is often 5-15 m, so the old
+  // 3 m gate was silently dropping most updates.
   bool _shouldRecordPoint(RoutePoint point) {
     if (_trackedPoints.isEmpty) return true;
     final last = _trackedPoints.last;
@@ -116,28 +131,38 @@ class _RunsScreenState extends State<RunsScreen> {
       LatLng(last.lat, last.lng),
       LatLng(point.lat, point.lng),
     );
-    return meters >= 3;
+    return meters >= 2;
   }
 
-  Future<void> _resumeActiveRun(RunItem activeRun) async {
-    try {
-      final points = await widget.controller.getRunPoints(activeRun.id);
-      if (!mounted) return;
-      setState(() {
-        _trackedPoints = points.map((point) => RoutePoint(lat: point.lat, lng: point.lng)).toList();
-        _syncElapsedFromStart(activeRun.startedAt);
-      });
-      if (_trackedPoints.isNotEmpty) {
-        final last = _trackedPoints.last;
-        _mapController.move(LatLng(last.lat, last.lng), 16);
-      }
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _message = 'Active run found. Tap Resume GPS to continue tracking.';
-      });
+  // FIX #3 helper — compute distance from a list of points.
+  double _calculateDistanceKm(List<RoutePoint> points) {
+    var meters = 0.0;
+    for (var i = 1; i < points.length; i++) {
+      meters += _distance(
+        LatLng(points[i - 1].lat, points[i - 1].lng),
+        LatLng(points[i].lat, points[i].lng),
+      );
     }
+    return meters / 1000;
   }
+
+  double? get _offRouteMeters {
+    final position = _currentPosition;
+    final route = _selectedRoute;
+    if (position == null || route == null || route.points.isEmpty) return null;
+    final here = LatLng(position.latitude, position.longitude);
+    return route.points
+        .map((p) => _distance(here, LatLng(p.lat, p.lng)))
+        .reduce((a, b) => a < b ? a : b);
+  }
+
+  double get _progress {
+    final routeDistance = _selectedRoute?.distanceKm ?? 0;
+    if (routeDistance <= 0) return 0;
+    return (_trackedDistanceKm / routeDistance).clamp(0.0, 1.0);
+  }
+
+  // ── lifecycle ────────────────────────────
 
   @override
   void initState() {
@@ -153,26 +178,23 @@ class _RunsScreenState extends State<RunsScreen> {
     super.dispose();
   }
 
+  // ── data loading ─────────────────────────
+
   Future<void> _loadHazardMarkers() async {
     try {
       final markers = await widget.controller.getMarkers();
       if (!mounted) return;
-      setState(() {
-        _hazardMarkers = markers;
-      });
+      setState(() => _hazardMarkers = markers);
     } catch (_) {
-      // Non-fatal: hazard pins are supplementary, don't block run tracking on failure.
+      // Non-fatal — hazard pins are supplementary.
     }
   }
 
   Future<void> _loadRuns() async {
     if (!widget.controller.isAuthenticated) {
-      setState(() {
-        _message = 'Please sign in before tracking a run.';
-      });
+      setState(() => _message = 'Please sign in before tracking a run.');
       return;
     }
-
     setState(() {
       _isLoading = true;
       _message = null;
@@ -186,10 +208,9 @@ class _RunsScreenState extends State<RunsScreen> {
       final manualRoutes = results[1] as List<ManualRouteItem>;
       if (!mounted) return;
       final wasTracking = _isTracking;
-      final activeRun = runs.cast<RunItem?>().firstWhere(
-            (run) => run?.status == 'active',
-            orElse: () => null,
-          );
+      final activeRun = runs
+          .cast<RunItem?>()
+          .firstWhere((r) => r?.status == 'active', orElse: () => null);
       setState(() {
         _runs = runs;
         _manualRoutes = manualRoutes;
@@ -206,121 +227,61 @@ class _RunsScreenState extends State<RunsScreen> {
       }
     } catch (error) {
       if (!mounted) return;
-      setState(() {
-        _message = '$error';
-      });
+      setState(() => _message = '$error');
     } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
-  ManualRouteItem? _pickSelectedRoute(List<ManualRouteItem> routes, RunItem? activeRun) {
+  Future<void> _resumeActiveRun(RunItem activeRun) async {
+    try {
+      final points = await widget.controller.getRunPoints(activeRun.id);
+      if (!mounted) return;
+      final routePoints =
+          points.map((p) => RoutePoint(lat: p.lat, lng: p.lng)).toList();
+      setState(() {
+        _trackedPoints = routePoints;
+        // FIX #3 — recompute stored distance when resuming.
+        _trackedDistanceKm = _calculateDistanceKm(routePoints);
+        _syncElapsedFromStart(activeRun.startedAt);
+      });
+      if (_trackedPoints.isNotEmpty) {
+        final last = _trackedPoints.last;
+        _mapController.move(LatLng(last.lat, last.lng), 16);
+      }
+    } catch (error) {
+      if (!mounted) return;
+      setState(
+          () => _message = 'Active run found. Tap Resume GPS to continue.');
+    }
+  }
+
+  ManualRouteItem? _pickSelectedRoute(
+      List<ManualRouteItem> routes, RunItem? activeRun) {
     if (routes.isEmpty) return null;
     if (activeRun?.manualRouteId != null) {
-      return routes.where((route) => route.id == activeRun!.manualRouteId).cast<ManualRouteItem?>().firstWhere(
-            (route) => route != null,
-            orElse: () => routes.first,
-          );
+      return routes
+          .cast<ManualRouteItem?>()
+          .firstWhere((r) => r?.id == activeRun!.manualRouteId,
+              orElse: () => routes.first);
     }
     return _selectedRoute ?? routes.first;
   }
 
-  Future<void> _locateMe() async {
-    setState(() {
-      _isLoading = true;
-      _message = null;
-    });
-    try {
-      final position = await _locationService.getCurrentPosition();
-      if (!mounted) return;
-      setState(() {
-        _currentPosition = position;
-      });
-      _mapController.move(LatLng(position.latitude, position.longitude), 16);
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _message = '$error';
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    }
-  }
+  // ── location stream ───────────────────────
 
-  Future<void> _startRun() async {
-    final route = _selectedRoute;
-    if (route == null) {
-      setState(() {
-        _message = 'Create and select a manual route first.';
-      });
-      return;
-    }
-
-    if (_positionSubscription != null) {
-      await _positionSubscription?.cancel();
-      _positionSubscription = null;
-    }
-    if (_runningTimer != null) {
-      _runningTimer?.cancel();
-      _runningTimer = null;
-    }
-
-    setState(() {
-      _isLoading = true;
-      _message = null;
-      _trackedPoints = const [];
-      _justFinishedRun = null;
-      _secondsElapsed = 0;
-      _headingDeg = null;
-      _isTracking = false;
-    });
-
-    try {
-      final run = await widget.controller.startRun(
-        manualRouteId: route.id,
-        notes: 'Following manual route: ${route.name}',
-      );
-      if (!mounted) return;
-      setState(() {
-        _activeRun = run;
-      });
-      await _startLocationStream();
-      await _loadRuns();
-    } catch (error) {
-      if (!mounted) return;
-      setState(() {
-        _message = '$error';
-      });
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
-    }
-  }
-
-  void _startTimer() {
-    _runningTimer?.cancel();
-    _runningTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-      if (mounted && _isTracking) {
-        setState(() {
-          _secondsElapsed++;
-        });
-      }
-    });
-  }
-
+  // FIX #2 — setState _isTracking = true BEFORE subscribing so that
+  // the timer callback sees the correct value from the very first tick.
   Future<void> _startLocationStream() async {
     await _positionSubscription?.cancel();
+
+    if (_activeRun?.startedAt != null) {
+      _syncElapsedFromStart(_activeRun!.startedAt);
+    }
+
+    // Set tracking flag first.
+    setState(() => _isTracking = true);
+
     _positionSubscription = _locationService.positionStream().listen(
       _handlePosition,
       onError: (Object error) {
@@ -331,13 +292,17 @@ class _RunsScreenState extends State<RunsScreen> {
         });
       },
     );
-    if (_activeRun?.startedAt != null) {
-      _syncElapsedFromStart(_activeRun!.startedAt);
-    }
-    setState(() {
-      _isTracking = true;
-    });
+
     _startTimer();
+  }
+
+  void _startTimer() {
+    _runningTimer?.cancel();
+    _runningTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (mounted && _isTracking) {
+        setState(() => _secondsElapsed++);
+      }
+    });
   }
 
   Future<void> _handlePosition(Position position) async {
@@ -347,18 +312,29 @@ class _RunsScreenState extends State<RunsScreen> {
     if (!mounted) return;
 
     final shouldRecord = _shouldRecordPoint(point);
+
     setState(() {
       _currentPosition = position;
       _headingDeg = heading;
       if (shouldRecord) {
-        _trackedPoints = [..._trackedPoints, point];
+        // Build new list (immutable pattern keeps Flutter's diffing happy).
+        final updated = [..._trackedPoints, point];
+        _trackedPoints = updated;
+        // FIX #3 — update the distance field inside the same setState so
+        // the UI rebuilds with the new value immediately.
+        _trackedDistanceKm = _calculateDistanceKm(updated);
       }
     });
-    if (_isTracking) {
-      _mapController.move(LatLng(position.latitude, position.longitude), _mapController.camera.zoom);
+
+    if (_isTracking && _currentPosition != null) {
+      _mapController.move(
+        LatLng(position.latitude, position.longitude),
+        _mapController.camera.zoom,
+      );
     }
 
     if (activeRun == null || !shouldRecord) return;
+
     try {
       await widget.controller.addRunPoints(
         runId: activeRun.id,
@@ -375,9 +351,67 @@ class _RunsScreenState extends State<RunsScreen> {
       );
     } catch (error) {
       if (!mounted) return;
-      setState(() {
-        _message = 'Tracking locally, upload failed: $error';
-      });
+      setState(() => _message = 'Tracking locally, upload failed: $error');
+    }
+  }
+
+  // ── run actions ───────────────────────────
+
+  Future<void> _locateMe() async {
+    setState(() {
+      _isLoading = true;
+      _message = null;
+    });
+    try {
+      final position = await _locationService.getCurrentPosition();
+      if (!mounted) return;
+      setState(() => _currentPosition = position);
+      _mapController.move(LatLng(position.latitude, position.longitude), 16);
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _message = '$error');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
+    }
+  }
+
+  Future<void> _startRun() async {
+    final route = _selectedRoute;
+    if (route == null) {
+      setState(() => _message = 'Create and select a manual route first.');
+      return;
+    }
+
+    await _positionSubscription?.cancel();
+    _positionSubscription = null;
+    _runningTimer?.cancel();
+    _runningTimer = null;
+
+    setState(() {
+      _isLoading = true;
+      _message = null;
+      _trackedPoints = const [];
+      _trackedDistanceKm = 0.0; // FIX #3 — reset field too
+      _justFinishedRun = null;
+      _secondsElapsed = 0;
+      _headingDeg = null;
+      _isTracking = false;
+    });
+
+    try {
+      final run = await widget.controller.startRun(
+        manualRouteId: route.id,
+        notes: 'Following manual route: ${route.name}',
+      );
+      if (!mounted) return;
+      setState(() => _activeRun = run);
+      await _startLocationStream();
+      await _loadRuns();
+    } catch (error) {
+      if (!mounted) return;
+      setState(() => _message = '$error');
+    } finally {
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
@@ -415,52 +449,17 @@ class _RunsScreenState extends State<RunsScreen> {
       await _loadRuns();
     } catch (error) {
       if (!mounted) return;
-      setState(() {
-        _message = '$error';
-      });
+      setState(() => _message = '$error');
     } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
+      if (mounted) setState(() => _isLoading = false);
     }
   }
 
   void _moveToRoute() {
     final route = _selectedRoute;
     if (route == null || route.points.isEmpty) return;
-    final first = route.points.first;
-    _mapController.move(LatLng(first.lat, first.lng), 15);
-  }
-
-  double get _trackedDistanceKm {
-    var meters = 0.0;
-    for (var index = 1; index < _trackedPoints.length; index += 1) {
-      final previous = _trackedPoints[index - 1];
-      final current = _trackedPoints[index];
-      meters += _distance(
-        LatLng(previous.lat, previous.lng),
-        LatLng(current.lat, current.lng),
-      );
-    }
-    return meters / 1000;
-  }
-
-  double get _progress {
-    final routeDistance = _selectedRoute?.distanceKm ?? 0;
-    if (routeDistance <= 0) return 0;
-    return (_trackedDistanceKm / routeDistance).clamp(0, 1);
-  }
-
-  double? get _offRouteMeters {
-    final position = _currentPosition;
-    final route = _selectedRoute;
-    if (position == null || route == null || route.points.isEmpty) return null;
-    final here = LatLng(position.latitude, position.longitude);
-    return route.points
-        .map((point) => _distance(here, LatLng(point.lat, point.lng)))
-        .reduce((value, element) => value < element ? value : element);
+    _mapController.move(
+        LatLng(route.points.first.lat, route.points.first.lng), 15);
   }
 
   void _openHistorySheet() {
@@ -470,22 +469,18 @@ class _RunsScreenState extends State<RunsScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (sheetContext) {
-        return DraggableScrollableSheet(
-          initialChildSize: 0.75,
-          minChildSize: 0.4,
-          maxChildSize: 0.95,
-          expand: false,
-          builder: (context, scrollController) {
-            return _RunHistorySheet(
-              runs: _runs,
-              scrollController: scrollController,
-              onRefresh: _loadRuns,
-              isLoading: _isLoading,
-            );
-          },
-        );
-      },
+      builder: (sheetContext) => DraggableScrollableSheet(
+        initialChildSize: 0.75,
+        minChildSize: 0.4,
+        maxChildSize: 0.95,
+        expand: false,
+        builder: (context, scrollController) => _RunHistorySheet(
+          runs: _runs,
+          scrollController: scrollController,
+          onRefresh: _loadRuns,
+          isLoading: _isLoading,
+        ),
+      ),
     );
   }
 
@@ -495,166 +490,181 @@ class _RunsScreenState extends State<RunsScreen> {
       shape: const RoundedRectangleBorder(
         borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
-      builder: (context) {
-        return Padding(
-          padding: const EdgeInsets.all(20),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Row(
-                children: [
-                  const Icon(Icons.warning_amber_rounded, color: Color(0xFFC45C4A)),
-                  const SizedBox(width: 8),
-                  Text(
-                    marker.categoryLabel,
-                    style: Theme.of(context).textTheme.titleMedium?.copyWith(fontWeight: FontWeight.w700),
-                  ),
-                ],
+      builder: (context) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(children: [
+              const Icon(Icons.warning_amber_rounded,
+                  color: Color(0xFFC45C4A)),
+              const SizedBox(width: 8),
+              Text(
+                marker.categoryLabel,
+                style: Theme.of(context)
+                    .textTheme
+                    .titleMedium
+                    ?.copyWith(fontWeight: FontWeight.w700),
               ),
+            ]),
+            const SizedBox(height: 8),
+            Text('Severity: ${marker.severity} • Confirms: ${marker.confirmCount}'),
+            if (marker.note != null && marker.note!.isNotEmpty) ...[
               const SizedBox(height: 8),
-              Text('Severity: ${marker.severity} • Confirms: ${marker.confirmCount}'),
-              if (marker.note != null && marker.note!.isNotEmpty) ...[
-                const SizedBox(height: 8),
-                Text(marker.note!),
-              ],
+              Text(marker.note!),
             ],
-          ),
-        );
-      },
+          ],
+        ),
+      ),
     );
   }
+
+  // ── build ─────────────────────────────────
 
   @override
   Widget build(BuildContext context) {
     final route = _selectedRoute;
-    final routePolyline = route?.points.map((point) => LatLng(point.lat, point.lng)).toList() ?? const <LatLng>[];
-    final trackedPolyline = _trackedPoints.map((point) => LatLng(point.lat, point.lng)).toList();
+    final routePolyline =
+        route?.points.map((p) => LatLng(p.lat, p.lng)).toList() ??
+            const <LatLng>[];
+    final trackedPolyline =
+        _trackedPoints.map((p) => LatLng(p.lat, p.lng)).toList();
     final currentPosition = _currentPosition;
     final offRouteMeters = _offRouteMeters;
     final justFinished = _justFinishedRun;
 
     final hazardMapMarkers = _hazardMarkers
-        .map(
-          (marker) => Marker(
-            point: LatLng(marker.lat, marker.lng),
-            width: 36,
-            height: 36,
-            child: GestureDetector(
-              onTap: () => _showHazardDetails(marker),
-              child: const _HazardPin(),
-            ),
-          ),
-        )
+        .map((m) => Marker(
+              point: LatLng(m.lat, m.lng),
+              width: 36,
+              height: 36,
+              child: GestureDetector(
+                onTap: () => _showHazardDetails(m),
+                child: const _HazardPin(),
+              ),
+            ))
         .toList();
 
+    // ── Summary screen (after finishing a run) ────────────────────────
     if (justFinished != null) {
-      final String? aiInsight = justFinished.aiInsight;
-      final String? aiReasoning = justFinished.aiReasoning;
-      final String? aiRecommendations = justFinished.aiRecommendations;
-
-      final hasAi = _hasRealAiInsight(aiInsight);
-
+      final hasAi = _hasRealAiInsight(justFinished.aiInsight);
       return Scaffold(
         backgroundColor: Colors.white,
         body: SafeArea(
           child: ListView(
             padding: const EdgeInsets.all(20),
             children: [
-              Row(
-                children: [
-                  IconButton(
-                    icon: const Icon(Icons.arrow_back, color: Colors.black87),
-                    onPressed: () {
-                      setState(() {
-                        _justFinishedRun = null;
-                        _trackedPoints = const [];
-                      });
-                    },
+              Row(children: [
+                IconButton(
+                  icon: const Icon(Icons.arrow_back, color: Colors.black87),
+                  onPressed: () => setState(() {
+                    _justFinishedRun = null;
+                    _trackedPoints = const [];
+                    _trackedDistanceKm = 0.0;
+                  }),
+                ),
+                const SizedBox(width: 4),
+                Expanded(
+                  child: Text(
+                    'Summary Result',
+                    style: Theme.of(context)
+                        .textTheme
+                        .headlineSmall
+                        ?.copyWith(fontWeight: FontWeight.bold),
                   ),
-                  const SizedBox(width: 4),
-                  Expanded(
-                    child: Text(
-                      'Summary Result',
-                      style: Theme.of(context).textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.bold),
-                    ),
-                  ),
-                  IconButton.filledTonal(
-                    tooltip: 'Run history',
-                    onPressed: _openHistorySheet,
-                    icon: const Icon(Icons.history),
-                  ),
-                ],
-              ),
+                ),
+                IconButton.filledTonal(
+                  tooltip: 'Run history',
+                  onPressed: _openHistorySheet,
+                  icon: const Icon(Icons.history),
+                ),
+              ]),
               const SizedBox(height: 20),
+              // Stats grid
               Container(
                 padding: const EdgeInsets.all(16),
                 decoration: BoxDecoration(
                   color: Colors.grey.shade100,
                   borderRadius: BorderRadius.circular(16),
                 ),
-                child: Column(
-                  children: [
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        Expanded(child: _MetricTile(label: 'Distance', value: '${justFinished.distanceKm.toStringAsFixed(2)} km')),
-                        Expanded(child: _MetricTile(label: 'Steps', value: '${justFinished.stepCount} steps')),
-                      ],
-                    ),
-                    const SizedBox(height: 16),
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceAround,
-                      children: [
-                        Expanded(child: _MetricTile(label: 'Duration', value: _formatDuration(justFinished.durationSeconds))),
-                        Expanded(
+                child: Column(children: [
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      Expanded(
                           child: _MetricTile(
-                            label: 'Pace',
-                            value: _formatPace(justFinished.avgPaceMinPerKm),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                ),
+                              label: 'Distance',
+                              value:
+                                  '${justFinished.distanceKm.toStringAsFixed(2)} km')),
+                      Expanded(
+                          child: _MetricTile(
+                              label: 'Steps',
+                              value: '${justFinished.stepCount} steps')),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      Expanded(
+                          child: _MetricTile(
+                              label: 'Duration',
+                              value: _formatDuration(
+                                  justFinished.durationSeconds))),
+                      Expanded(
+                          child: _MetricTile(
+                              label: 'Pace',
+                              value:
+                                  _formatPace(justFinished.avgPaceMinPerKm))),
+                    ],
+                  ),
+                ]),
               ),
               const SizedBox(height: 16),
+              // AI insight card
               Container(
                 padding: const EdgeInsets.all(18),
                 decoration: BoxDecoration(
                   color: const Color(0xFFE8F5E9),
                   borderRadius: BorderRadius.circular(16),
-                  border: Border.all(color: const Color(0xFFA5D6A7), width: 1),
+                  border:
+                      Border.all(color: const Color(0xFFA5D6A7), width: 1),
                 ),
                 child: Column(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Row(
-                      children: [
-                        Icon(Icons.auto_awesome, color: Color(0xFF2E7D32)),
-                        SizedBox(width: 8),
-                        Text(
-                          'AI Insight Summary',
-                          style: TextStyle(color: Color(0xFF2E7D32), fontWeight: FontWeight.bold, fontSize: 16),
-                        ),
-                      ],
-                    ),
+                    const Row(children: [
+                      Icon(Icons.auto_awesome, color: Color(0xFF2E7D32)),
+                      SizedBox(width: 8),
+                      Text('AI Insight Summary',
+                          style: TextStyle(
+                              color: Color(0xFF2E7D32),
+                              fontWeight: FontWeight.bold,
+                              fontSize: 16)),
+                    ]),
                     const Divider(color: Color(0xFFA5D6A7), height: 24),
                     if (hasAi) ...[
-                      _ReadableAiSection(title: 'Insight', body: aiInsight!),
-                      if (aiReasoning != null && aiReasoning.isNotEmpty) ...[
+                      _ReadableAiSection(
+                          title: 'Insight', body: justFinished.aiInsight!),
+                      if (justFinished.aiReasoning?.isNotEmpty == true) ...[
                         const SizedBox(height: 14),
-                        _ReadableAiSection(title: 'Reasoning', body: aiReasoning),
+                        _ReadableAiSection(
+                            title: 'Reasoning',
+                            body: justFinished.aiReasoning!),
                       ],
-                      if (aiRecommendations != null && aiRecommendations.isNotEmpty) ...[
+                      if (justFinished.aiRecommendations?.isNotEmpty ==
+                          true) ...[
                         const SizedBox(height: 14),
-                        _ReadableAiSection(title: 'Recommendations', body: aiRecommendations),
+                        _ReadableAiSection(
+                            title: 'Recommendations',
+                            body: justFinished.aiRecommendations!),
                       ],
                     ] else
                       Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 12.0),
+                        padding: const EdgeInsets.symmetric(vertical: 12),
                         child: Text(
-                          _formatAiStatusMessage(aiInsight),
+                          _formatAiStatusMessage(justFinished.aiInsight),
                           style: const TextStyle(
                             color: Color(0xFF2E7D32),
                             fontWeight: FontWeight.w500,
@@ -671,8 +681,10 @@ class _RunsScreenState extends State<RunsScreen> {
       );
     }
 
-    final bool canFinishRun = !_isLoading && _activeRun != null;
-    final bool canStartRun = !_isLoading && _activeRun == null && route != null;
+    // ── Main run-tracking screen ──────────────────────────────────────
+    final canFinishRun = !_isLoading && _activeRun != null;
+    final canStartRun =
+        !_isLoading && _activeRun == null && route != null;
 
     return ListView(
       padding: const EdgeInsets.all(20),
@@ -689,6 +701,7 @@ class _RunsScreenState extends State<RunsScreen> {
           ],
         ),
         const SizedBox(height: 12),
+        // ── Map ──────────────────────────────────────────────────────
         Container(
           height: 380,
           clipBehavior: Clip.antiAlias,
@@ -699,80 +712,75 @@ class _RunsScreenState extends State<RunsScreen> {
           child: FlutterMap(
             mapController: _mapController,
             options: MapOptions(
-              initialCenter: routePolyline.isNotEmpty ? routePolyline.first : const LatLng(18.8059, 98.9523),
+              initialCenter: routePolyline.isNotEmpty
+                  ? routePolyline.first
+                  : const LatLng(18.8059, 98.9523),
               initialZoom: 15,
             ),
             children: [
               TileLayer(
-                urlTemplate: 'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
+                urlTemplate:
+                    'https://tile.openstreetmap.org/{z}/{x}/{y}.png',
                 userAgentPackageName: 'runna_mobile',
               ),
               if (routePolyline.isNotEmpty)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: routePolyline,
-                      strokeWidth: 6,
-                      color: const Color(0xFF23402B),
-                    ),
-                  ],
-                ),
+                PolylineLayer(polylines: [
+                  Polyline(
+                    points: routePolyline,
+                    strokeWidth: 6,
+                    color: const Color(0xFF23402B),
+                  ),
+                ]),
               if (trackedPolyline.isNotEmpty)
-                PolylineLayer(
-                  polylines: [
-                    Polyline(
-                      points: trackedPolyline,
-                      strokeWidth: 6,
-                      color: const Color(0xFF2A9D8F),
-                    ),
-                    Polyline(
-                      points: trackedPolyline,
-                      strokeWidth: 2,
-                      color: const Color(0xFFB2DFDB),
-                      borderStrokeWidth: 0,
-                    ),
-                  ],
-                ),
+                PolylineLayer(polylines: [
+                  Polyline(
+                    points: trackedPolyline,
+                    strokeWidth: 6,
+                    color: const Color(0xFF2A9D8F),
+                  ),
+                  Polyline(
+                    points: trackedPolyline,
+                    strokeWidth: 2,
+                    color: const Color(0xFFB2DFDB),
+                    borderStrokeWidth: 0,
+                  ),
+                ]),
               if (_trackedPoints.isNotEmpty)
                 CircleLayer(
                   circles: _trackedPoints
-                      .map(
-                        (point) => CircleMarker(
-                          point: LatLng(point.lat, point.lng),
-                          radius: 4,
-                          useRadiusInMeter: false,
-                          color: const Color(0x662A9D8F),
-                          borderColor: const Color(0xFF2A9D8F),
-                          borderStrokeWidth: 1,
-                        ),
-                      )
+                      .map((p) => CircleMarker(
+                            point: LatLng(p.lat, p.lng),
+                            radius: 4,
+                            useRadiusInMeter: false,
+                            color: const Color(0x662A9D8F),
+                            borderColor: const Color(0xFF2A9D8F),
+                            borderStrokeWidth: 1,
+                          ))
                       .toList(),
                 ),
               if (currentPosition != null && currentPosition.accuracy > 0)
-                CircleLayer(
-                  circles: [
-                    CircleMarker(
-                      point: LatLng(currentPosition.latitude, currentPosition.longitude),
-                      radius: currentPosition.accuracy,
-                      useRadiusInMeter: true,
-                      color: const Color(0x222A9D8F),
-                      borderColor: const Color(0x552A9D8F),
-                      borderStrokeWidth: 1,
-                    ),
-                  ],
-                ),
-              MarkerLayer(
-                markers: [
-                  ...hazardMapMarkers,
-                  if (currentPosition != null)
-                    Marker(
-                      point: LatLng(currentPosition.latitude, currentPosition.longitude),
-                      width: 48,
-                      height: 48,
-                      child: _DirectionalLocationPin(headingDeg: _headingDeg),
-                    ),
-                ],
-              ),
+                CircleLayer(circles: [
+                  CircleMarker(
+                    point: LatLng(
+                        currentPosition.latitude, currentPosition.longitude),
+                    radius: currentPosition.accuracy,
+                    useRadiusInMeter: true,
+                    color: const Color(0x222A9D8F),
+                    borderColor: const Color(0x552A9D8F),
+                    borderStrokeWidth: 1,
+                  ),
+                ]),
+              MarkerLayer(markers: [
+                ...hazardMapMarkers,
+                if (currentPosition != null)
+                  Marker(
+                    point: LatLng(
+                        currentPosition.latitude, currentPosition.longitude),
+                    width: 48,
+                    height: 48,
+                    child: _DirectionalLocationPin(headingDeg: _headingDeg),
+                  ),
+              ]),
             ],
           ),
         ),
@@ -780,8 +788,11 @@ class _RunsScreenState extends State<RunsScreen> {
         if (_message != null)
           Padding(
             padding: const EdgeInsets.only(bottom: 12),
-            child: Text(_message!, style: TextStyle(color: Theme.of(context).colorScheme.error)),
+            child: Text(_message!,
+                style: TextStyle(
+                    color: Theme.of(context).colorScheme.error)),
           ),
+        // ── Control card ─────────────────────────────────────────────
         Container(
           padding: const EdgeInsets.all(16),
           decoration: BoxDecoration(
@@ -791,24 +802,27 @@ class _RunsScreenState extends State<RunsScreen> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(_activeRun == null ? 'No active run' : 'Active run #${_activeRun!.id}'),
+              Text(_activeRun == null
+                  ? 'No active run'
+                  : 'Active run #${_activeRun!.id}'),
               const SizedBox(height: 12),
               DropdownButtonFormField<int>(
                 value: route?.id,
-                decoration: const InputDecoration(labelText: 'Manual route'),
+                decoration:
+                    const InputDecoration(labelText: 'Manual route'),
                 items: _manualRoutes
-                    .map(
-                      (item) => DropdownMenuItem<int>(
-                        value: item.id,
-                        child: Text('${item.name} (${item.distanceKm.toStringAsFixed(2)} km)'),
-                      ),
-                    )
+                    .map((r) => DropdownMenuItem<int>(
+                          value: r.id,
+                          child: Text(
+                              '${r.name} (${r.distanceKm.toStringAsFixed(2)} km)'),
+                        ))
                     .toList(),
                 onChanged: _activeRun != null
                     ? null
                     : (routeId) {
                         setState(() {
-                          _selectedRoute = _manualRoutes.firstWhere((item) => item.id == routeId);
+                          _selectedRoute = _manualRoutes
+                              .firstWhere((r) => r.id == routeId);
                         });
                         _moveToRoute();
                       },
@@ -816,30 +830,31 @@ class _RunsScreenState extends State<RunsScreen> {
               const SizedBox(height: 12),
               LinearProgressIndicator(value: _progress),
               const SizedBox(height: 8),
+              // FIX #3 — use _trackedDistanceKm field (not a getter)
               Text(
-                'Progress: ${(_progress * 100).toStringAsFixed(0)}% • Tracked: ${_trackedDistanceKm.toStringAsFixed(2)} km'
+                'Progress: ${(_progress * 100).toStringAsFixed(0)}%'
+                ' • Tracked: ${_trackedDistanceKm.toStringAsFixed(2)} km'
                 ' • ~${_estimateSteps(_trackedDistanceKm)} steps'
                 '${_activeRun != null ? ' • Time: ${_formatDuration(_secondsElapsed)}' : ''}',
               ),
               if (_isTracking && _headingDeg != null) ...[
                 const SizedBox(height: 6),
-                Row(
-                  children: [
-                    Transform.rotate(
-                      angle: _headingDeg! * math.pi / 180,
-                      child: const Icon(Icons.navigation, size: 16, color: Color(0xFF2A9D8F)),
-                    ),
-                    const SizedBox(width: 6),
-                    Text('Heading: ${_headingLabel(_headingDeg)}'),
-                  ],
-                ),
+                Row(children: [
+                  Transform.rotate(
+                    angle: _headingDeg! * math.pi / 180,
+                    child: const Icon(Icons.navigation,
+                        size: 16, color: Color(0xFF2A9D8F)),
+                  ),
+                  const SizedBox(width: 6),
+                  Text('Heading: ${_headingLabel(_headingDeg)}'),
+                ]),
               ],
               if (offRouteMeters != null) ...[
                 const SizedBox(height: 6),
                 Text(
                   offRouteMeters > 50
                       ? 'Off route by about ${offRouteMeters.toStringAsFixed(0)} m'
-                      : 'On route • nearest route point ${offRouteMeters.toStringAsFixed(0)} m away',
+                      : 'On route • nearest point ${offRouteMeters.toStringAsFixed(0)} m away',
                 ),
               ],
               const SizedBox(height: 12),
@@ -860,7 +875,11 @@ class _RunsScreenState extends State<RunsScreen> {
                     child: const Text('Finish run'),
                   ),
                   OutlinedButton(
-                    onPressed: _isLoading || _activeRun == null || _isTracking ? null : _startLocationStream,
+                    onPressed: _isLoading ||
+                            _activeRun == null ||
+                            _isTracking
+                        ? null
+                        : _startLocationStream,
                     child: const Text('Resume GPS'),
                   ),
                 ],
@@ -879,6 +898,10 @@ class _RunsScreenState extends State<RunsScreen> {
   }
 }
 
+// ─────────────────────────────────────────────────────────
+// Small reusable widgets
+// ─────────────────────────────────────────────────────────
+
 class _HazardPin extends StatelessWidget {
   const _HazardPin();
 
@@ -889,10 +912,12 @@ class _HazardPin extends StatelessWidget {
         color: Color(0xFFC45C4A),
         shape: BoxShape.circle,
         boxShadow: [
-          BoxShadow(color: Color(0x33000000), blurRadius: 6, offset: Offset(0, 2)),
+          BoxShadow(
+              color: Color(0x33000000), blurRadius: 6, offset: Offset(0, 2))
         ],
       ),
-      child: const Icon(Icons.warning_amber_rounded, color: Colors.white, size: 18),
+      child: const Icon(Icons.warning_amber_rounded,
+          color: Colors.white, size: 18),
     );
   }
 }
@@ -906,11 +931,18 @@ class _MetricTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
-      mainAxisAlignment: MainAxisAlignment.center,
       children: [
-        Text(label, style: TextStyle(color: Colors.grey.shade600, fontSize: 12, fontWeight: FontWeight.w500)),
+        Text(label,
+            style: TextStyle(
+                color: Colors.grey.shade600,
+                fontSize: 12,
+                fontWeight: FontWeight.w500)),
         const SizedBox(height: 2),
-        Text(value, style: const TextStyle(color: Colors.black87, fontSize: 15, fontWeight: FontWeight.bold)),
+        Text(value,
+            style: const TextStyle(
+                color: Colors.black87,
+                fontSize: 15,
+                fontWeight: FontWeight.bold)),
       ],
     );
   }
@@ -926,9 +958,15 @@ class _ReadableAiSection extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(title, style: const TextStyle(color: Color(0xFF1B5E20), fontWeight: FontWeight.bold, fontSize: 14)),
+        Text(title,
+            style: const TextStyle(
+                color: Color(0xFF1B5E20),
+                fontWeight: FontWeight.bold,
+                fontSize: 14)),
         const SizedBox(height: 4),
-        Text(body, style: const TextStyle(color: Colors.black87, height: 1.4, fontSize: 13)),
+        Text(body,
+            style: const TextStyle(
+                color: Colors.black87, height: 1.4, fontSize: 13)),
       ],
     );
   }
@@ -936,7 +974,6 @@ class _ReadableAiSection extends StatelessWidget {
 
 class _DirectionalLocationPin extends StatelessWidget {
   const _DirectionalLocationPin({required this.headingDeg});
-
   final double? headingDeg;
 
   @override
@@ -947,8 +984,8 @@ class _DirectionalLocationPin extends StatelessWidget {
         Container(
           width: 34,
           height: 34,
-          decoration: BoxDecoration(
-            color: const Color(0x332A9D8F),
+          decoration: const BoxDecoration(
+            color: Color(0x332A9D8F),
             shape: BoxShape.circle,
           ),
         ),
@@ -963,10 +1000,9 @@ class _DirectionalLocationPin extends StatelessWidget {
               border: Border.all(color: Colors.white, width: 3),
               boxShadow: const [
                 BoxShadow(
-                  color: Color(0x33000000),
-                  blurRadius: 8,
-                  offset: Offset(0, 2),
-                ),
+                    color: Color(0x33000000),
+                    blurRadius: 8,
+                    offset: Offset(0, 2))
               ],
             ),
             child: const Icon(Icons.navigation, color: Colors.white, size: 16),
@@ -976,6 +1012,10 @@ class _DirectionalLocationPin extends StatelessWidget {
     );
   }
 }
+
+// ─────────────────────────────────────────────────────────
+// Run history bottom sheet
+// ─────────────────────────────────────────────────────────
 
 class _RunHistorySheet extends StatefulWidget {
   const _RunHistorySheet({
@@ -999,7 +1039,8 @@ class _RunHistorySheetState extends State<_RunHistorySheet> {
 
   @override
   Widget build(BuildContext context) {
-    final List<RunItem> finishedRuns = widget.runs.where((run) => run.status == 'finished').toList();
+    final finishedRuns =
+        widget.runs.where((r) => r.status == 'finished').toList();
 
     return Column(
       children: [
@@ -1018,7 +1059,8 @@ class _RunHistorySheetState extends State<_RunHistorySheet> {
           child: Row(
             mainAxisAlignment: MainAxisAlignment.spaceBetween,
             children: [
-              Text('Run history', style: Theme.of(context).textTheme.titleLarge),
+              Text('Run history',
+                  style: Theme.of(context).textTheme.titleLarge),
               IconButton(
                 onPressed: widget.isLoading ? null : widget.onRefresh,
                 icon: const Icon(Icons.refresh),
@@ -1032,17 +1074,13 @@ class _RunHistorySheetState extends State<_RunHistorySheet> {
               ? const Center(child: Text('No finished runs yet.'))
               : ListView.builder(
                   controller: widget.scrollController,
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
                   itemCount: finishedRuns.length,
                   itemBuilder: (context, index) {
                     final run = finishedRuns[index];
                     final isExpanded = _expandedRunId == run.id;
-
-                    final String? aiInsight = run.aiInsight;
-                    final String? aiReasoning = run.aiReasoning;
-                    final String? aiRecommendations = run.aiRecommendations;
-
-                    final hasAi = _hasRealAiInsight(aiInsight);
+                    final hasAi = _hasRealAiInsight(run.aiInsight);
 
                     return Card(
                       margin: const EdgeInsets.only(bottom: 10),
@@ -1052,11 +1090,15 @@ class _RunHistorySheetState extends State<_RunHistorySheet> {
                           ListTile(
                             title: Text('Run #${run.id}'),
                             subtitle: Text(
-                              '${run.distanceKm.toStringAsFixed(2)} km • ${_formatRunDuration(run.durationSeconds)} • ${run.stepCount} steps'
+                              '${run.distanceKm.toStringAsFixed(2)} km'
+                              ' • ${_formatRunDuration(run.durationSeconds)}'
+                              ' • ${run.stepCount} steps'
                               '${run.avgPaceMinPerKm != null ? ' • ${_formatRunPace(run.avgPaceMinPerKm)}' : ''}',
                             ),
                             trailing: Icon(
-                              isExpanded ? Icons.expand_less : Icons.expand_more,
+                              isExpanded
+                                  ? Icons.expand_less
+                                  : Icons.expand_more,
                               color: const Color(0xFF2A9D8F),
                             ),
                             onTap: () => setState(() {
@@ -1065,7 +1107,8 @@ class _RunHistorySheetState extends State<_RunHistorySheet> {
                           ),
                           if (isExpanded)
                             Padding(
-                              padding: const EdgeInsets.fromLTRB(16, 0, 16, 16),
+                              padding:
+                                  const EdgeInsets.fromLTRB(16, 0, 16, 16),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
@@ -1076,11 +1119,23 @@ class _RunHistorySheetState extends State<_RunHistorySheet> {
                                       borderRadius: BorderRadius.circular(12),
                                     ),
                                     child: Row(
-                                      mainAxisAlignment: MainAxisAlignment.spaceAround,
+                                      mainAxisAlignment:
+                                          MainAxisAlignment.spaceAround,
                                       children: [
-                                        Expanded(child: _MetricTile(label: 'Distance', value: '${run.distanceKm.toStringAsFixed(2)} km')),
-                                        Expanded(child: _MetricTile(label: 'Steps', value: '${run.stepCount}')),
-                                        Expanded(child: _MetricTile(label: 'Duration', value: _formatRunDuration(run.durationSeconds))),
+                                        Expanded(
+                                            child: _MetricTile(
+                                                label: 'Distance',
+                                                value:
+                                                    '${run.distanceKm.toStringAsFixed(2)} km')),
+                                        Expanded(
+                                            child: _MetricTile(
+                                                label: 'Steps',
+                                                value: '${run.stepCount}')),
+                                        Expanded(
+                                            child: _MetricTile(
+                                                label: 'Duration',
+                                                value: _formatRunDuration(
+                                                    run.durationSeconds))),
                                       ],
                                     ),
                                   ),
@@ -1091,25 +1146,40 @@ class _RunHistorySheetState extends State<_RunHistorySheet> {
                                     decoration: BoxDecoration(
                                       color: const Color(0xFFE8F5E9),
                                       borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(color: const Color(0xFFA5D6A7)),
+                                      border: Border.all(
+                                          color: const Color(0xFFA5D6A7)),
                                     ),
                                     child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      crossAxisAlignment:
+                                          CrossAxisAlignment.start,
                                       children: [
                                         if (hasAi) ...[
-                                          _ReadableAiSection(title: 'Insight', body: aiInsight!),
-                                          if (aiReasoning != null && aiReasoning.isNotEmpty) ...[
+                                          _ReadableAiSection(
+                                              title: 'Insight',
+                                              body: run.aiInsight!),
+                                          if (run.aiReasoning?.isNotEmpty ==
+                                              true) ...[
                                             const SizedBox(height: 8),
-                                            _ReadableAiSection(title: 'Reasoning', body: aiReasoning),
+                                            _ReadableAiSection(
+                                                title: 'Reasoning',
+                                                body: run.aiReasoning!),
                                           ],
-                                          if (aiRecommendations != null && aiRecommendations.isNotEmpty) ...[
+                                          if (run.aiRecommendations
+                                                  ?.isNotEmpty ==
+                                              true) ...[
                                             const SizedBox(height: 8),
-                                            _ReadableAiSection(title: 'Recommendations', body: aiRecommendations),
+                                            _ReadableAiSection(
+                                                title: 'Recommendations',
+                                                body: run.aiRecommendations!),
                                           ],
                                         ] else
                                           Text(
-                                            _formatAiStatusMessage(aiInsight),
-                                            style: const TextStyle(color: Color(0xFF1B5E20), fontStyle: FontStyle.italic),
+                                            _formatAiStatusMessage(
+                                                run.aiInsight),
+                                            style: const TextStyle(
+                                              color: Color(0xFF1B5E20),
+                                              fontStyle: FontStyle.italic,
+                                            ),
                                           ),
                                       ],
                                     ),
